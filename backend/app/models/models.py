@@ -37,5 +37,5 @@ class ConflictLog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     batch_code: Mapped[str] = mapped_column(String(40))
     oven_id: Mapped[int] = mapped_column(Integer)
-    detail: Mapped[str] = mapped_column(String(240))
+    detail: Mapped[str] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

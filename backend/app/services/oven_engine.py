@@ -149,11 +149,12 @@ def plan_group(
         return []
     working = list(existing)
     placements: list[GroupPlacement] = []
-    order = list(enumerate(items))
+    # Due-earliest first; ties keep the submitted order.
+    order = sorted(items, key=lambda it: (it.due_min, it.submitted_index))
     phantom_id = -1
-    for order_index, (_, item) in enumerate(order):
+    for order_index, item in enumerate(order):
         oven_ends: dict[int, int | None] = {}
-        best: tuple[int, int, int] | None = None
+        best: tuple[int, int, int] | None = None  # (end, oven_id, start)
         for oven_id in oven_ids:
             slot = next_free_window(
                 working,
@@ -161,13 +162,18 @@ def plan_group(
                 item.recipe.total,
                 search_from=item.start_min,
             )
-            oven_ends[oven_id] = slot.end if slot else None
-            if slot is not None:
-                if best is None:
-                    best = (oven_id, slot.end, slot.start)
+            if slot is None or slot.end > item.due_min:
+                # Earliest slot misses the due (or does not fit the day);
+                # record the raw earliest end so conflict reports can show it.
+                oven_ends[oven_id] = slot.end if slot else None
+                continue
+            oven_ends[oven_id] = slot.end
+            cand = (slot.end, oven_id, slot.start)
+            if best is None or cand < best:
+                best = cand
         if best is None:
             raise GroupPlanError(order_index, item, oven_ends)
-        oven_id, end_min, start_min = best
+        end_min, oven_id, start_min = best
         placements.append(
             GroupPlacement(
                 submitted_index=item.submitted_index,

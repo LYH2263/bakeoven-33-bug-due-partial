@@ -162,65 +162,63 @@ def create_batch_group(body: BatchGroupCreate, db: Session = Depends(get_db)):
         for idx, (product, it) in enumerate(zip(products, body.items))
     ]
 
-    created: list[Batch] = []
-    placements = []
-    remaining = list(items)
+    # Plan the whole group in memory first — nothing touches the database
+    # until every item has a feasible placement, so a failure leaves no
+    # partial batches behind on either the batch table or the gantt.
     occ = _all_occupancies(db)
-    while remaining:
-        chunk = [remaining[0]]
-        try:
-            step = plan_group(occ, [o.id for o in ovens], chunk)
-        except GroupPlanError as err:
-            stuck = err.item
-            oven_rows = [
-                GroupConflictOven(
-                    oven_id=oven_id,
-                    oven_label=oven_labels[oven_id],
-                    earliest_end_min=end,
-                )
-                for oven_id, end in sorted(err.oven_ends.items())
-            ]
-            ends_text = "；".join(
-                f"{oven_labels[row.oven_id]}最早{_hhmm(row.earliest_end_min)}"
-                f"（{row.earliest_end_min if row.earliest_end_min is not None else '—'} 分）"
-                for row in oven_rows
+    try:
+        placements = plan_group(occ, [o.id for o in ovens], items)
+    except GroupPlanError as err:
+        stuck = err.item
+        oven_rows = [
+            GroupConflictOven(
+                oven_id=oven_id,
+                oven_label=oven_labels[oven_id],
+                earliest_end_min=end,
             )
-            detail = (
-                f"成组定炉第 {err.order_index + 1} 条 {stuck.code} 无炉可排："
-                f"应出炉 {stuck.due_min} 分（{_hhmm(stuck.due_min)}）前烤不完；{ends_text}。"
-            )
-            db.add(ConflictLog(batch_code=stuck.code, oven_id=0, detail=detail))
-            db.commit()
-            raise HTTPException(
-                409,
-                detail=GroupConflictDetail(
-                    message=detail,
-                    order_index=err.order_index,
-                    submitted_index=stuck.submitted_index,
-                    batch_code=stuck.code,
-                    due_min=stuck.due_min,
-                    ovens=oven_rows,
-                ).model_dump(),
-            )
-        plc = step[0]
-        placements.append(plc)
-        batch = Batch(
+            for oven_id, end in sorted(err.oven_ends.items())
+        ]
+        ends_text = "；".join(
+            f"{oven_labels[row.oven_id]}最早{_hhmm(row.earliest_end_min)}"
+            f"（{row.earliest_end_min if row.earliest_end_min is not None else '—'} 分）"
+            for row in oven_rows
+        )
+        detail = (
+            f"成组定炉第 {err.order_index + 1} 条（按应出炉从早到晚）{stuck.code} 无炉可排："
+            f"应出炉 {stuck.due_min} 分（{_hhmm(stuck.due_min)}）前烤不完；{ends_text}。"
+            f"整组 {len(items)} 条均未写入。"
+        )
+        db.add(ConflictLog(batch_code=stuck.code, oven_id=0, detail=detail))
+        db.commit()
+        raise HTTPException(
+            409,
+            detail=GroupConflictDetail(
+                message=detail,
+                order_index=err.order_index,
+                submitted_index=stuck.submitted_index,
+                batch_code=stuck.code,
+                due_min=stuck.due_min,
+                ovens=oven_rows,
+            ).model_dump(),
+        )
+
+    # All placements feasible — persist the group in one transaction.
+    batches = [
+        Batch(
             product_id=plc.product_id,
             oven_id=plc.oven_id,
             code=plc.code,
             start_min=plc.start_min,
         )
-        db.add(batch)
-        db.commit()
-        db.refresh(batch)
-        created.append(batch)
-        occ.extend(build_occupancies(plc.oven_id, batch.id, plc.start_min, chunk[0].recipe))
-        remaining.pop(0)
+        for plc in placements
+    ]
+    db.add_all(batches)
+    db.commit()
+    for b in batches:
+        db.refresh(b)
 
-    created_by_code = {b.code: b for b in created}
     out: list[GroupPlacementOut] = []
     for plc in placements:
-        batch = created_by_code[plc.code]
         product = db.get(Product, plc.product_id)
         ferment_end = plc.start_min + (product.ferment_min if product else 0)
         out.append(
