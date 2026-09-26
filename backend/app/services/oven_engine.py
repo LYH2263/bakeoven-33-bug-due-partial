@@ -149,11 +149,12 @@ def plan_group(
         return []
     working = list(existing)
     placements: list[GroupPlacement] = []
-    order = list(enumerate(items))
+    # Stable sort: due_min ascending, ties keep submitted order.
+    order = sorted(items, key=lambda it: it.due_min)
     phantom_id = -1
-    for order_index, (_, item) in enumerate(order):
+    for order_index, item in enumerate(order):
         oven_ends: dict[int, int | None] = {}
-        best: tuple[int, int, int] | None = None
+        best: tuple[int, int, int] | None = None  # (end_min, oven_id, start_min)
         for oven_id in oven_ids:
             slot = next_free_window(
                 working,
@@ -162,12 +163,13 @@ def plan_group(
                 search_from=item.start_min,
             )
             oven_ends[oven_id] = slot.end if slot else None
-            if slot is not None:
-                if best is None:
-                    best = (oven_id, slot.end, slot.start)
+            if slot is not None and slot.end <= item.due_min:
+                candidate = (slot.end, oven_id, slot.start)
+                if best is None or candidate < best:
+                    best = candidate
         if best is None:
             raise GroupPlanError(order_index, item, oven_ends)
-        oven_id, end_min, start_min = best
+        end_min, oven_id, start_min = best
         placements.append(
             GroupPlacement(
                 submitted_index=item.submitted_index,
